@@ -1,0 +1,387 @@
+---
+title: "Analisis COVID19"
+author: "Juan Herranz Martin"
+date: "10 de abril de 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+library(knitr)
+library(kableExtra)
+library(tidyverse) #%>%
+library(magrittr) #%<>%
+library(lubridate)
+library(rnaturalearth) #para mapas con datos del mundo
+library(plotly) #para graficos interactivos
+library(xts) #series temporales
+library(dygraphs) #representacion con xts
+use_python("/Users/Juan/anaconda3/python.exe")
+```
+
+# Carga y limpieza preliminar de los datos
+
+Los datos que se van a analizar en este documento proceden de la compilación hecha por usuario de [Kaggle](https://www.kaggle.com/imdevskp/corona-virus-report).
+
+```{python}
+import pandas as pd
+datos = pd.read_csv("covid_19_clean_complete.csv")
+datos.head(10)
+```
+
+```{r}
+pd <- import("pandas")
+datos <- pd$read_csv("covid_19_clean_complete.csv")
+kable(head(datos, 10))
+```
+
+```{r}
+datos <- read.csv("covid_19_clean_complete.csv")
+#kable(head(datos, 10))  
+
+#tidyverse
+datos %>% head(10) %>% kable() %>% kable_styling()
+```
+
+## Estructura de los datos
+```{r}
+str(datos)
+
+colnames(datos) = c("Provincia_Estado", "Pais_Region", 
+                    "Latitud", #N+ o S-
+                    "Longitud", #E+ o W-
+                    "Fecha", "Casos_Confirmados", "Casos_Muertos", 
+                    "Casos_Recuperados", "Casos_Activos", "Region_WHO")
+
+datos %>% head() %>% kable() %>% kable_styling()
+
+datos$Provincia_Estado <- as.vector(datos$Provincia_Estado)
+datos$Provincia_Estado <- as.factor(datos$Provincia_Estado)
+datos$Pais_Region <- as.factor(datos$Pais_Region)
+#datos$Fecha %<>% ymd()
+datos$Fecha <- as.Date(datos$Fecha)
+#datos$Region_WHO <- as.factor(datos$Region_WHO)
+datos$Region_WHO %<>% as.factor() #flujo hacia alante y atras (mas rapido)
+
+str(datos)
+
+```
+
+ 
+$$Confirmados = Muertos + Recuperados + Activos$$
+
+```{r}
+#si no tuvieramos la columna de activos
+#datos %<>% mutate(Casos_activos = Casos_Confirmados - Casos_Muertos - Casos_Recuperados)
+
+datos %>%
+  filter(Casos_Confirmados>10000) %>%
+  head(10) %>%
+  kable()
+
+#por si hay datos que no cumplen la ecuación (casos negativos):
+datos %>%
+  filter(Casos_Activos < 0) %>%
+  arrange(Provincia_Estado, Fecha) %>% #para ordenar
+  kable() %>% kable_styling()
+
+#veamos que pasa en Hainan:
+datos %>% filter(Provincia_Estado =="Hainan") %>%
+  head(10) %>%
+  kable() %>% kable_styling()
+  
+#corregimos los casos erroneos (porque sabemos en este caso de donde viene el error)
+datos %>%
+  filter(Provincia_Estado == "Hainan", Casos_Activos < 0) %>%
+  mutate(Casos_Recuperados = Casos_Recuperados + Casos_Activos, Casos_Activos = 0 )
+```
+
+# Análisis geográfico
+
+```{r}
+#filtramos geográficamente Europa con un rectangulo
+
+#forma 1
+#datos_europa = datos[datos$Latitud>38 & datos$Longitud>-25 & datos$Longitud<30,] #no acotamos el norte
+
+#forma 2
+datos_europa = datos %>%
+  filter(Latitud>38, between(Longitud, -25, 30))
+
+table(datos_europa$Pais_Region) %>% 
+  as.data.frame() %>% #filter no funciona con table
+  filter(Freq > 0) %>% #quitamos los que son 0 (fuera del rectangulo)
+  kable() %>% kable_styling()
+
+#estado de europa el dia del confinamiento de españa
+datos_europa %>%
+  filter(Fecha == ymd("2020-03-15")) %>%
+  kable() %>% kable_styling()
+```
+
+$$d(x.y)= \sqrt{(x_{Lat}-y_{Lat})^2+(x_{Long}-y_{Long})^2}$$
+```{r}
+#filtramos con circulo geográfico en fechas concretas, definimos funcion
+
+distancia_grados = function(x,y){
+  sqrt((x[1]-y[1])^2+(x[2]-y[2])^2)
+}
+
+distancia_grados_potsdam = function(x){
+  potsdam=c(52.366956, 13.906734)
+  distancia_grados(x, potsdam)
+}
+
+#distancia de cada lat y long de los datos de europa a potsdam
+dist_potsdam = apply(cbind(datos_europa$Latitud, datos_europa$Longitud), MARGIN = 1,
+                     FUN = distancia_grados_potsdam)  #MARGIN=1 -> por filas
+#añadimos columna
+datos_europa %<>%
+  mutate(dist_potsdam = dist_potsdam)
+#filtramos por fecha y distancia menor de 4 grados (circulo centro potsdam y radio 4 grados)
+datos_europa %>%
+  filter(between(Fecha, dmy("2-3-2020"), dmy("7-3-2020")),
+         dist_potsdam < 4) %>%
+  kable() %>% kable_styling()
+```
+
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf") #datos del mundo
+
+ggplot(data = world) + geom_sf(color = "black", fill="green") + 
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo", subtitle = "COVID19")
+
+ggplot(data = world) + geom_sf(color = "black", aes(fill = mapcolor13)) +  #utilizamos una estética (aes)
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo", subtitle = "COVID19")
+ 
+#añadimos un level porque USA coincida en el nombre de ambos sets
+datos$Pais_Region = factor(datos$Pais_Region, levels= c(levels(datos$Pais_Region), "United States"))
+datos[datos$Pais_Region=="US",]$Pais_Region = "United States"  #para que USA coincida en el nombre
+
+#intentemos cruzar los datos (puede haber problemas de inconsistencia entre los nombres de los paises de cada set)
+world %>%
+  inner_join(datos, by=c("name"="Pais_Region")) %>%
+  filter(Fecha == dmy("15-03-2020")) %>%
+  ggplot() + geom_sf(color = "black", aes(fill = Casos_Confirmados)) +  
+  scale_fill_viridis_c(option="plasma",trans="sqrt") + 
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo", subtitle = "COVID19")
+
+
+#otra fecha (aumento de casos)
+world %>%
+  inner_join(datos, by=c("name"="Pais_Region")) %>%
+  filter(Fecha == dmy("30-03-2020")) %>%
+  ggplot() + geom_sf(color = "black", aes(fill = Casos_Confirmados)) +  
+  scale_fill_viridis_c(option="plasma",trans="sqrt") + #para mejor visualizacion
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo", subtitle = "COVID19")
+
+
+world %>%
+  inner_join(datos, by=c("name"="Pais_Region")) %>%
+  filter(Fecha == dmy("30-03-2020")) %>%
+  ggplot() + geom_sf(color = "black", aes(fill = Casos_Confirmados)) + 
+  coord_sf(crs="+proj=laea +lat_0=50 + lon_0=10 +units=m +ellps=GRS80") + #transformacion de la proyeccion (centrada en EU)
+  scale_fill_viridis_c(option="plasma",trans="sqrt") + 
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo", subtitle = "COVID19")
+```
+
+```{r}
+#para ver concentracion de casos con puntos, sin necesidad del mapa inicialmnete
+datos %>%
+  filter(Fecha==dmy("30-03-2020")) %>%
+  ggplot(aes(Longitud, Latitud))+
+  geom_point(aes(size = Casos_Confirmados, colour = Casos_Muertos))
+
+#para mejor escala de tamaños
+datos %>%
+  filter(Fecha==dmy("30-03-2020")) %>%
+  ggplot(aes(Longitud, Latitud))+
+  geom_point(aes(size = log(Casos_Confirmados+1), colour = log(Casos_Muertos+1))) +
+  coord_fixed()+ #ajustar tamaño mapa 
+  theme(legend.position = "bottom") #para que la leyenda no quite espacio
+
+```
+
+
+```{r}
+#necesitamos mapa plano para poder hacer zoom
+world %>%
+  inner_join(datos, by=c("name"="Pais_Region")) %>%
+  filter(Fecha == dmy("30-03-2020")) %>%
+  ggplot() + geom_sf(color = "black", aes(fill = Casos_Confirmados)) + 
+#  coord_sf(crs="+proj=laea +lat_0=50 + lon_0=10 +units=m +ellps=GRS80") 
+  scale_fill_viridis_c(option="plasma",trans="sqrt") + 
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo", subtitle = "COVID19") -> g #lo guardamos en una variable
+
+#hacemos uso de plotly
+ggplotly(g)
+```
+
+
+```{r}
+#vamos a hacer un top, que dará mejor información, del ratio de muertes/infectados
+
+thr=1000 #añadimos un threshold
+
+datos %>%
+  filter(Fecha==ymd("2020-05-10"), Casos_Confirmados>thr) %>% #evitamos los datos con pocos casos
+  mutate(Prop_Muertos = Casos_Muertos/Casos_Confirmados, #mutate no guarda la nueva columna, solo la muestra
+         Ranking = dense_rank(desc(Prop_Muertos))) %>% #ordenamos
+  arrange(Ranking) %>%
+  head(20) %>%
+  kable() %>% kable_styling()
+```
+
+
+
+```{r}
+#vamos a agrupar por latitudes y longitudes en clases. Representaremos el nº de observaciones, no los casos
+datos$lat_class = cut(datos$Latitud, breaks = nclass.scott(datos$Latitud)) #cortamos segun alguna regla
+datos$long_class = cut(datos$Longitud, breaks = nclass.Sturges(datos$Longitud))
+
+datos$lat_class = cut(datos$Latitud, breaks = seq(from = -90, to = 90, by = 10)) #cortamos con paso de 10
+datos$long_class = cut(datos$Longitud, breaks = seq(from = -180, to = 180, by = 10))
+
+tt=table(datos$lat_class, datos$long_class) #el N esta al S y al reves, cambiamos el orden
+tt= tt[nrow(tt):1,]
+
+#mosaicplot para "juntar" dos histogramas
+mosaicplot(tt) #muchos datos en horizontal, transponemos a ver si mejora
+mosaicplot(t(tt), shade = T) #aqui lo que vemos en realidad es un mapa del mundo de la info acumulada
+```
+
+
+## Análisis de datos temporal
+```{r}
+datos_por_fecha= aggregate(
+  cbind(Casos_Confirmados, Casos_Muertos,
+        Casos_Recuperados, Casos_Activos) ~ Fecha, #datos acumulados por fecha
+  data = datos,
+  FUN = sum
+)
+
+
+barplot(Casos_Confirmados ~ Fecha, data = datos_por_fecha)
+
+#barras apliladas:
+bara = datos_por_fecha[,3:5]
+bara2 = as.data.frame(t(bara)) 
+names(bara2)= datos_por_fecha$Fecha
+bara2=as.matrix(bara2) #se suele hacer de una matriz
+
+barplot(bara2, col=c("red","green","blue"), space = 1, border = "NA")
+legend("topleft", c("Muertos", "Recuperados", "Activos"), col=c("red","green","blue"), pch=2, lwd = 2 )
+
+plot(Casos_Confirmados ~ Fecha, data=datos_por_fecha, col="blue", type="l",
+     main="Cosos documentados por día en todo en mundo", ylab="Número de personas")
+
+plot(Casos_Confirmados ~ Fecha, data=datos_por_fecha, col="blue", type="l",
+     main="Cosos documentados por día en todo en mundo", ylab="Número de personas", log="y") #escala log
+lines(Casos_Muertos ~ Fecha, data = datos_por_fecha, col="red")
+lines(Casos_Recuperados ~ Fecha, data = datos_por_fecha, col="green")
+
+legend("topleft", c("Confirmados", "Muertos", "Recuperados"), col=c("blue", "red", "green"), pch=1, lwd = 2 )
+```
+
+```{r}
+datos_spain = datos %>% 
+  filter(Pais_Region=="Spain") %>%
+  select(Fecha, starts_with("Casos_"))  #seleccionamos las variables utiles
+
+plot(x=datos_spain$Fecha, y = datos_spain$Casos_Confirmados, main="Casos confirmados en España",
+     type="s", col="blue", lwd=2) #type s = step = escalón
+
+barplot(as.matrix(t(datos_spain[,3:5])),
+        names=datos_spain$Fecha,
+        col=c("red","green","yellow"), main="Estudio de casos por tipo en España",
+        xlab="Fecha", ylab="Número de personas")
+legend("topleft", c("Muertos", "Recuperados", "Activos"), col=c("red", "green", "yellow"), lwd=2, pch=1)
+```
+
+
+```{r}
+datos_por_fecha_ts <- xts(x=datos_por_fecha[,2:5],
+                          order.by = datos_por_fecha$Fecha) #creamos el objeto temporal
+
+#lo representamos con dygraph
+dygraph(datos_por_fecha_ts) %>%
+  dyOptions(labelsUTC = T, labelsKMB = T,
+            fillGraph = T, fillAlpha = 0.05,
+            drawGrid = F) %>%
+  dyRangeSelector() %>%
+  dyCrosshair(direction = "vertical") %>%
+  dyHighlight(highlightCircleSize = 5, highlightSeriesBackgroundAlpha = 0.2,
+              hideOnMouseOut = F) %>%
+  dyRoller(rollPeriod = 2)
+
+
+
+
+
+#para españa
+datos_spain_ts <- xts(x=datos_spain[,2:5],
+                          order.by = datos_spain$Fecha) #creamos el objeto temporal
+
+
+dygraph(datos_por_fecha_ts) %>%
+  dyOptions(labelsUTC = T, labelsKMB = T,
+            fillGraph = T, fillAlpha = 0.05,
+            drawGrid = F) %>%
+  dyRangeSelector() %>%
+  dyCrosshair(direction = "vertical") %>%
+  dyHighlight(highlightCircleSize = 5, highlightSeriesBackgroundAlpha = 0.3) %>%
+  dyRoller(rollPeriod = 1)
+                         
+```
+
+```{r}
+#Estudio de nuevos casos (desagregar los datos acumulados)
+
+lag(datos_spain$Casos_Confirmados, n=1) #mismo vector pero un dia atrasado en el tiempo
+lead(datos_spain$Casos_Confirmados, n=1) #un dia adelantado
+#n=7 si queremos los nuevos casos semanalmente
+
+#asi, restando los casos de un dia menos los del anterior, obtenemos los nuevos
+
+datos_spain %<>%
+  mutate(Nuevos_Casos_Confirmados = Casos_Confirmados - lag(Casos_Confirmados, n=1),
+         Nuevos_Casos_Muertos = Casos_Muertos - lag(Casos_Muertos, n=1),
+         Nuevos_Casos_Recuperados = Casos_Recuperados - lag(Casos_Recuperados, n=1))
+         #no tendria sentido calcular los nuevos activos (son los nuevos confirmados - recup. o muertos)
+
+plot(Nuevos_Casos_Confirmados~Fecha, data=datos_spain, type = "l", col="blue",
+     xlab="Fecha", ylab="Nuevos casos", main= "Nuevos registros en España")
+lines(Nuevos_Casos_Muertos~Fecha, data=datos_spain, type="l", col="red")
+lines(Nuevos_Casos_Recuperados~Fecha, data=datos_spain, type="l", col="green")
+legend("topleft", c("Confirmados", "Muertos", "Recuperados"),
+       col=c("blue","red","green"), lwd=2, pch=1)
+
+
+
+# Tasa de variacion media TVM
+datos_spain %<>%
+  mutate(TVM_Confirmados = (Casos_Confirmados - lag(Casos_Confirmados, n=1))/Casos_Confirmados,
+         TVM_Muertos = (Casos_Muertos - lag(Casos_Muertos, n=1))/Casos_Muertos,
+         TVM_Recuperados = (Casos_Recuperados - lag(Casos_Recuperados, n=1))/Casos_Recuperados)
+
+plot(TVM_Confirmados~Fecha, data=datos_spain, type = "l", col="blue",
+     xlab="Fecha", ylab="Nuevos casos", main= "TVM Nuevos registros en España")
+lines(TVM_Muertos~Fecha, data=datos_spain, type="l", col="red")
+lines(TVM_Recuperados~Fecha, data=datos_spain, type="l", col="green")
+legend("topleft", c("Confirmados", "Muertos", "Recuperados"),
+       col=c("blue","red","green"), lwd=2, pch=1)
+
+
+
+```
+
+
+
+
