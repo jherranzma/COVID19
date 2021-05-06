@@ -382,6 +382,41 @@ legend("topleft", c("Confirmados", "Muertos", "Recuperados"),
 
 ```
 
+## Análisis por Cohortes
+```{r}
+#creamos un nuevo dataset para hacer coincidir los cohortes, que los contagios empiecen igual para todos los paises
+
+#el ultimo dia sin registro de contagios por paises
+primer_contagio <- datos %>%
+  group_by(Pais_Region) %>%
+  filter(Casos_Confirmados>0) %>%
+  summarise(Primer_Contagio = min(Fecha)-1) 
+
+
+data_first = datos %>%
+  inner_join(primer_contagio, by = "Pais_Region") %>% 
+  mutate(Dias_Desde_PC = as.numeric(Fecha - Primer_Contagio)) %>%
+  filter(Dias_Desde_PC >=0) %>%
+  group_by(Dias_Desde_PC, Pais_Region) %>%
+  summarise(Casos_Confirmados=sum(Casos_Confirmados),
+            Casos_Muertos=sum(Casos_Muertos),
+            Casos_Activos=sum(Casos_Activos),
+            Casos_Recuperados=sum(Casos_Recuperados))
+
+data_first %>%
+#  filter(Pais_Region %in% c("Spain","Italy","China","United States","Germany")) %>%
+  ggplot(aes(x=Dias_Desde_PC, y=Casos_Confirmados)) + 
+  geom_line(aes(col=Pais_Region)) + 
+  xlab("Dias desde primer contagio")+
+  ylab("Nº personas contagiadas")+
+  ggtitle("Análisis por Cohortes") +
+  theme(legend.position = "none") -> g
+  
+
+ggplotly(g)
+
+```
+
 
 
 
